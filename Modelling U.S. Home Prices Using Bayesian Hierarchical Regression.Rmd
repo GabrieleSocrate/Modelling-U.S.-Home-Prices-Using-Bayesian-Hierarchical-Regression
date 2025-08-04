@@ -1,0 +1,1050 @@
+---
+title: "Modelling U.S. Home Prices Using Bayesian Hierarchical Regression"
+author: "Lorenzo Galli, Gabriele Socrate"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The dataset is about median housing price for neighbourhoods in North America in 2012. The data was downloaded from Kaggle and was collected and published by researchers on Zenodo: each row represents a neighbourhood, which are in total 20428, while the seven variables are the following:
+
+- **housing median age** (in years): the median age of the housing in the neighbourhood;
+
+- **total rooms**: total number of rooms in the neighbourhood;
+
+- **total bedrooms**: total number of bedrooms in the neighbourhood;
+
+- **population**: the population of the neighbourhood;
+
+- **households**: the number of households in the neighbourhood;
+
+- **median income** (in thousands of dollars): the median income of the neighbourhood;
+ 
+- **ocean proximity** (categorical) with levels: Near Bay, <1 Hour from Ocean, Inland, Near Ocean;    
+
+The quantitative response is:  Median house value (in dollars) of the neighbourhood.  
+
+
+## Goal of the study  
+This analysis has two main objectives: first, to examine whether the median house value in different neighborhoods varies with respect to their distance from the ocean; and second, to investigate how the influence of the variables on the response changes depending on this distance.  
+
+# Exploratory Data Analysis  
+
+Before fitting the model, we should have a general understanding of the variables through summary statistics
+and graphical representations.
+
+```{r, warning=FALSE, echo=FALSE}
+library(readr)
+Housing_data <- read_csv("Housing_data.csv", show_col_types = FALSE)
+cat("NA:", sum(is.na(Housing_data)), "  Duplicate rows:",sum(duplicated(Housing_data)))
+summary(Housing_data, show_col_types = FALSE)
+```
+
+To see if the median house value changes across the distance of the ocean, we can see from a boxplot; for simplicity, we will consider the Median House price in thousands of dollars.
+
+```{r echo=FALSE, warning=FALSE, fig.width=10, fig.height=4}
+library(ggplot2)
+library(gridExtra)
+library(ggplotify)
+
+boxplot_plot <- as.ggplot(function() {
+  boxplot(Housing_data$median_house_value / 1000 ~ Housing_data$ocean_proximity,
+          col = "lightblue", las = 1,
+          cex.axis = 0.7, xlab = "Ocean proximity",
+          ylab = "Median House value (x1000)")
+})
+
+ggplot_plot <- suppressMessages(ggplot(Housing_data, aes(x = median_income, y = median_house_value, color = ocean_proximity)) +
+  geom_point(alpha = 0.1) +
+  coord_cartesian(ylim = c(0, 6e05)) + # Punti del dataset
+  geom_smooth(method = "lm", se = FALSE, size = 1.2) +  # Linee di tendenza separate per gruppo
+  theme_minimal() +
+  labs(
+    title = "Effect of income on house prices",
+    x = "Median Income (x1000)",
+    y = "Median House value (x1000)",
+    color = "Ocean proximity"
+  ) +
+  theme(
+    legend.position = c(0.95, 0.05),  # In basso a destra
+    legend.justification = c(1, 0),   # L'angolo inferiore destro della legenda corrisponde al punto
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.5, "lines"),
+    legend.background = element_rect(fill = alpha("white", 0.6), color = NA)
+  )
+)
+grid.arrange(boxplot_plot, ggplot_plot, ncol = 2)
+```
+
+Before fitting any models, the boxplot reveals a clear difference in house prices across the groups. In particular, the "Inland" group shows significantly lower prices—approximately half those of the other groups—while the "<1H OCEAN" group displays less variability in price compared to the "Near Bay" and "Near Ocean" categories.
+Additionally, the relationship between *median income* and house value appears consistent across all groups, as indicated by the similar slopes of the fitted trend lines. This pattern holds for the other predictor variables as well: their effect on the response does not appear to vary substantially between groups.
+
+# Hierarchical Model
+
+Since we have seen from the graphs the difference in the median house prices between different ocean distance, we want to fit a hierarchical model to better adress the diversity between groups: the four groups (in our case, the ocean distance's levels) are the first level, while the units within groups (neighbourhoods) are the second level. We assume that the observations are independent and identically distributed given a group specific parameter and a common variance:  
+\[
+(y_{1j}, \ldots, y_{nj}) \mid \theta_j, \sigma^2 \overset{\text{i.i.d.}}{\sim} \mathcal{N}(\theta_j, \sigma^2)
+\]
+
+We are interested in the group-specific means $(\theta_1, \ldots, \theta_m)$, the within-group variability $\sigma^2$ that is assumed common for each group, and the mean and variance of the $\underline{\theta}: (\mu, \tau^2)$. 
+We assume that:  
+\[
+(\theta_1, \ldots, \theta_m) \mid \mu, \tau^2 \overset{\text{i.i.d.}}{\sim} \mathcal{N}(\mu, \tau^2)
+\]  
+
+while the independent priors are:  
+\[
+\frac{1}{\sigma^2} \sim \mathrm{Gamma}\left(\frac{\nu_0}{2}, \frac{\nu_0}{2} \sigma_0^2 \right)
+\]  
+
+\[
+\frac{1}{\tau^2} \sim \mathrm{Gamma}\left(\frac{\eta_0}{2}, \frac{\eta_0}{2} \tau_0^2 \right)
+\]  
+
+\[
+\mu \sim \mathcal{N}\left(\mu_0, \gamma_0^2\right)
+\]  
+
+As prior hyperparameters, we have chosen values: $\mu_0 = 200$ is the median price of USA houses in 2012; $\gamma_0^2$, $\tau_0^2$ and $\sigma_0^2$ are all fixed as large values in order to have weakly informative priors.
+```{r}
+mu.0 = 200; gamma.0_2 = 2500 
+nu.0 = 2; sigma.0_2 = 1000 
+eta.0 = 2; tau.0_2 = 1000 
+```
+
+Since we are in the semi-conjugate case, the joint posterior distribution is:
+$$
+p(\mu, \tau^2, \sigma^2, \theta_1, \ldots, \theta_m \mid \underline{y}_1, \ldots, \underline{y}_m) 
+\propto 
+\prod_{j=1}^{m} \left\{ \prod_{i=1}^{n_j} p(y_{ij} \mid \theta_j, \sigma^2) \right\} 
+\cdot \prod_{j=1}^{m} p(\theta_j \mid \mu, \tau^2) 
+\cdot p(\mu) \cdot p(\tau^2) \cdot p(\sigma^2)
+$$
+that can be approximated by using Gibbs Sampling from the full conditional distributions of $\mu$, $\tau^2$, $\theta_J$ and $\sigma_2$.  
+The full conditional of $\mu$ is obtained through:
+\[
+p(\mu \mid \text{rest}) \propto p(\mu) \times \prod_{j=1}^m p(\theta_j \mid \mu, \tau^2)
+\]  
+
+\[
+\mu \mid \text{rest} \sim \mathcal{N}\left(
+\frac{\frac{\mu_0}{\gamma_0^2} + \frac{m \bar{\theta}}{\tau^2}}{\frac{1}{\gamma_0^2} + \frac{m}{\tau^2}}, \quad
+\left(\frac{1}{\gamma_0^2} + \frac{m}{\tau^2}\right)^{-1}
+\right)
+\hspace{1cm}\text{where}\
+\bar{\theta} = \frac{1}{m} \sum_{j=1}^{m} \theta_j
+\] 
+$\mu_n$ is a weighted average between the prior mean $\mu_0$ and the sample mean $\bar{\theta}$, where the weights are the prior precision $1/\tau_0^2$ and the sample precision $m/\tau^2$; $\gamma_n^2$ is the sum of the sample variance and prior variance. 
+
+The full conditional of $\tau^2$ is obtained through:
+\[
+p(\tau^2 \mid \text{rest}) \propto p(\tau^2) \times \prod_{j=1}^m p(\theta_j \mid \mu, \tau^2)
+\]
+\[
+\frac{1}{\tau^2} \mid \text{rest} \sim \mathrm{Gamma}\left(
+\frac{\eta_0 + m}{2}, \quad
+\frac{\eta_0 \tau_0^2 + \sum_{j=i}^m (\theta_j - \mu)^2}{2}
+\right)
+\]
+Since $\tau^2$ is the variance between groups, then $m$ can be considered as the sample size of $\tau^2$. So $\eta_n$ is the sum between prior sample size $\eta_0$ and actual sample size $m$; $\tau_n^2$, that coincides with the posterior mean of $\tau^2$, is the sum of prior mean of $\tau^2$ and the sum of the square deviation of each $\theta_j$ from their mean $\mu$, which represents a measure of the variability of each $\theta_j$. 
+
+The full conditional of $\theta_J$ is obtained through:
+\[
+p(\theta_j \mid \text{rest}) \propto p(\theta_j \mid \mu, \tau^2) \times \prod_{i=1}^{n_j} p(y_{ij} \mid \theta_j, \sigma^2)
+\]  
+\[
+\theta_j \mid \text{rest} \sim \mathcal{N}\left(
+\frac{\frac{\mu}{\tau^2} + \frac{n_j \bar{y}_j}{\sigma^2}}{\frac{1}{\tau^2} + \frac{n_j}{\sigma^2}}, \quad
+\left(\frac{1}{\tau^2} + \frac{n_j}{\sigma^2}\right)^{-1}
+\right)
+\hspace{1cm}\text{where}\
+\bar{y}_j = \frac{1}{n_j} \sum_{i=1}^{n_j} y_{ij}
+\]
+
+The posterior expectation of $\theta_j$ is the weighted average between the prior mean $\mu$ of $\underline\theta$ and the sample mean $\bar{y_j}$, where the weights are the prior precision $1/\tau^2$ and sample precision $n_j/\sigma^2$. The posterior variance of $\theta_j$ is the sum of the prior variance and sample variance. 
+
+
+The full conditional of $\sigma^2$ is obtained through:
+\[
+p(\sigma^2 \mid \text{rest}) \propto p(\sigma^2) \times \prod_{j=i}^{m} \prod_{i=1}^{n_j} p(y_{ij} \mid \theta_j, \sigma^2)
+\]
+\[
+\frac{1}{\sigma^2} \mid \text{rest} \sim \mathrm{Gamma}\left(
+\frac{\nu_0 + n}{2}, \quad
+\frac{\nu_0 \sigma_0^2 + \sum_{j=1}^m \sum_{i=1}^{n_j} (y_{ij} - \theta_j)^2}{2}
+\right) \hspace{1cm} \text{where} \
+n = \sum_{j=1}^m n_j
+\]
+
+$\nu_n$ is the sum between prior sample size $\nu_0$ and actual sample size $n$, while $\sigma_n^2$ is the posterior expectation of $\sigma^2$, that is the sum of the prior mean $\sigma_0^2$ and the sum of squared deviation of each observation $y_{ij}$ from the mean of their respective group $\theta_j$.
+
+To approximate the posterior distribution, we can consider the following Gibbs Sampling scheme:
+```{=latex}
+\begin{align*}
+&\text{Initialize } \theta_1^{(0)},\ldots,\theta_m^{(0)},\ (\tau^2)^{(0)},\ (\sigma^2)^{(0)} \\
+&\textbf{for } s = 1,\ldots,5000: \\
+&\quad \text{Update } (\mu,\ \tau^2): \\
+&\quad \quad \text{Sample } \mu^{(s)} \sim p\left(\mu \mid \theta_1^{(s-1)},\ldots,\theta_m^{(s-1)},(\tau^2)^{(s-1)}\right) \\
+&\quad \quad \text{Sample } (\tau^2)^{(s)} \sim p\left(\tau^2 \mid \theta_1^{(s-1)},\ldots,\theta_m^{(s-1)},\mu^{(s)}\right) \\
+&\quad \text{Update } (\theta_1,\ldots,\theta_m): \\
+&\quad \quad \textbf{for } j = 1 \text{ to } 4: \\
+&\quad \quad \quad \text{Sample } \theta_j^{(s)} \sim p\left(\theta_j \mid \underline{y}_j,\ \mu^{(s)},\ (\tau^2)^{(s)},\ (\sigma^2)^{(s-1)}\right) \\
+&\quad \text{Update } \sigma^2: \\
+&\quad \quad \text{Sample } (\sigma^2)^{(s)} \sim p\left(\sigma^2 \mid \underline{y},\ \theta_1^{(s)},\ldots,\theta_m^{(s)}\right)
+\end{align*}
+```
+
+We initialize $\underline{\theta}$, $\sigma^2$ and $\tau^2$ in the following way:
+```{r, eval=FALSE}
+x = as.numeric(factor(Housing_data$ocean_proximity))
+y = Housing_data$median_house_value/1000
+
+theta = c()
+  vars = c()
+  
+  for (j in unique(x)){
+    theta[j] = mean(y[x == j])
+    vars[j] = var(y[x == j])
+  }
+  
+  tau_2 = var(theta) 
+  sigma_2 = mean(vars)
+```
+
+where each $\theta$ is the mean of the response in the $\text{j-th}$ group, $\tau^2$ is the variance between groups (variance of $\theta$) and $\sigma^2$ is the common variance across groups.
+
+```{r include=FALSE}
+x = as.numeric(factor(Housing_data$ocean_proximity))
+y = Housing_data$median_house_value/1000 # Scrivo i prezzi in migliaia 
+# scriviamo le full conditional di mu e tau_2
+
+set.seed(1)
+
+full_conditional_mu_tau = function(theta, tau_2, gamma.0_2, mu.0, eta.0, tau.0_2){
+  
+  # inializziamo m e theta.bar per mu
+  
+  m = length(theta)
+  theta_bar = mean(theta)
+  
+  ##########
+  # full conditional mu
+  ##########
+  
+  # aggiorniamo i parametri
+  
+  gamma.n_2 = (1/gamma.0_2 + m/tau_2)^-1
+  mu.n = ((mu.0/gamma.0_2 + m * theta_bar/tau_2) * gamma.n_2)
+  
+  # faccio sample di mu
+  
+  mu = rnorm(1, mu.n, sqrt(gamma.n_2))
+  
+  ##########
+  # full conditional tau
+  ##########
+  
+  eta.n = eta.0 + m
+  tau_2 = (rgamma(1, eta.n/2, (eta.0 * tau.0_2 + sum((theta - mu)^2))/2))^(-1)
+  
+  return(mu_tau = list(mu = mu, tau_2 = tau_2))
+}
+
+############
+# full conditional theta
+############
+
+full_conditional_theta = function(mu, tau_2, sigma_2, yj){
+  
+  # inizializzo nj e yj_bar per theta
+  
+  nj = length(yj)
+  yj_bar = mean(yj)
+  
+  # aggiorniamo i parametri 
+  
+  tau.n_2 = (1/tau_2 + nj/sigma_2)^-1
+  mu.n = (mu/tau_2 + nj * yj_bar/sigma_2) * tau.n_2
+  
+  # faccio sample di theta
+  
+  thetaj = rnorm(1, mu.n, sqrt(tau.n_2))
+  
+  return(thetaj)
+}
+
+#############
+# full conditional sigma
+#############
+full_conditional_sigma = function(y, x, theta, nu.0, sigma.0_2){
+  
+  # inizializziamo n e la somma rispetto a i
+  
+  n = length(y)
+  m = length(theta)
+  res = c()
+  for (j in 1:m){
+    res[j] = sum((y[x == j] - theta[j])^2)
+  }
+  
+  # aggiorniamo i parametri
+  
+  nu.n = nu.0 + n
+  sigma.n_2 = nu.0 * sigma.0_2 + sum(res)
+  
+  # facciamo sample di sigma
+  
+  sigma_2 = (rgamma(1, nu.n/2, sigma.n_2/2))^-1
+  
+  return(sigma_2)
+}
+
+
+###############
+# Gibbs Sampler
+###############
+
+Gibbs_sampler = function(nu.0, sigma.0_2, tau.0_2, mu.0, eta.0, gamma.0_2, y, x, S){
+
+  m = length(unique(x))
+  
+  theta.post  = matrix(NA, S, m)
+  sigma_2.post = c()
+  mu.post     = c()
+  tau_2.post   = c()
+  
+  # inizializziamo theta, sigma_2, tau_2
+  
+  theta = c()
+  vars = c()
+  
+  for (j in unique(x)){
+    theta[j] = mean(y[x == j])
+    vars[j] = var(y[x == j])
+  }
+  
+  tau_2 = var(theta) # questa è la varianza tra i theta
+  sigma_2 = mean(vars) # questa è la varianza constante nei gruppi
+  
+
+  
+  for (s in 1:S){
+    
+    ###########
+    # Sample di mu e tau_2
+    ###########
+    
+    mu_tau_2 = full_conditional_mu_tau(theta, tau_2, gamma.0_2, mu.0, eta.0, tau.0_2)
+    mu = mu_tau_2$mu
+    tau_2 = mu_tau_2$tau_2
+    
+    ###########
+    # Sample di theta
+    ###########
+    
+    theta = c()
+
+    for (j in unique(x)){
+      yj = y[x == j]
+      thetaj = full_conditional_theta(mu, tau_2, sigma_2, yj)
+      theta[j] = thetaj
+    }
+    
+    ###########
+    # Sample di sigma_2
+    ###########
+    
+    sigma_2 = full_conditional_sigma(y, x, theta, nu.0, sigma.0_2)
+    
+    ###########
+    # memorizziamo i dati
+    ###########
+    
+    theta.post[s,] = theta
+    sigma_2.post[s] = sigma_2
+    tau_2.post[s] = tau_2
+    mu.post[s] = mu
+  
+  }
+  
+  group_names = levels(factor(Housing_data$ocean_proximity))
+  colnames(theta.post) = group_names
+  
+  
+  return(list(theta.post = theta.post,
+              sigma_2.post = sigma_2.post,
+              tau_2.post = tau_2.post,
+              mu.post = mu.post))
+}
+
+
+S = 5000
+output = Gibbs_sampler(nu.0, sigma.0_2, tau.0_2, mu.0, eta.0, gamma.0_2, y, x, S)
+```
+
+```{r echo=FALSE, fig.width=12, fig.height=9}
+par(mfrow = c(3, 4))
+hist(output$theta.post[, 1], main = expression(theta ~ " <1 Hour"), xlab =  expression("Posterior " ~ theta[1]))
+hist(output$theta.post[, 2], main = expression(theta ~ " Inland"), xlab =  expression("Posterior " ~ theta[2]))
+hist(output$theta.post[, 3], main = expression(theta ~ " Near Bay"), xlab =  expression("Posterior " ~ theta[3]))
+hist(output$theta.post[, 4], main = expression(theta ~ " Near Ocean"), xlab =  expression("Posterior " ~ theta[4]))
+plot(output$theta.post[, 1], type = "l", ylab = expression("Posterior " ~ theta[1]))
+plot(output$theta.post[, 2], type = "l", ylab = expression("Posterior " ~ theta[2]))
+plot(output$theta.post[, 3], type = "l", ylab = expression("Posterior " ~ theta[3]))
+plot(output$theta.post[, 4], type = "l", ylab = expression("Posterior " ~ theta[4]))
+acf(output$theta.post[, 1], main = expression("ACF for posterior " ~ theta[1]))
+acf(output$theta.post[, 2], main = expression("ACF for posterior " ~ theta[2]))
+acf(output$theta.post[, 3], main = expression("ACF for posterior " ~ theta[3]))
+acf(output$theta.post[, 4], main = expression("ACF for posterior " ~ theta[4]))
+```
+```{r echo=FALSE, fig.width=15, fig.height=8}
+par(mfrow = c(3,3))
+hist(output$sigma_2.post, main = expression("Posterior " ~ sigma^2), xlab = expression(sigma^2))
+plot(output$sigma_2.post, type = "l", ylab = expression("Posterior " ~ sigma^2))
+acf(output$sigma_2.post, main = expression("ACF for posterior " ~ sigma^2))
+hist(output$tau_2.post, main = expression("Posterior " ~ tau^2), xlab = expression(tau^2))
+plot(output$tau_2.post, type = "l", ylab = expression("Posterior " ~ tau^2))
+acf(output$tau_2.post, main = expression("ACF for posterior " ~ tau^2))
+hist(output$mu.post, main = expression("Posterior " ~ mu), xlab = expression(mu))
+plot(output$mu.post, type = "l", ylab = expression("Posterior " ~ mu))
+acf(output$mu.post, main = expression("ACF for posterior " ~ mu))
+```
+
+
+Comparing the histograms of the parameters and the respective traceplots, the Markov chains are centered around the posterior mode. Moreover, we can see that there is no seasonality nor trends in the chains, meaning that there is very low dependence. To better adress the independence, the autocorrelation plots show that each parameter value doesn't depend on the past values: a rule-of-thumb is that we should we should thin the chain if the acf is greater than 0.2 at different lags, but this is not our case, so no thinning nor burn-in is needed.
+
+```{r echo=FALSE, fig.width=6, fig.height=3}
+boxplot(output$theta.post, xlab = "Ocean proximity", ylab = "Median House price (x1000)", main = expression("Boxplot of posterior " * theta), cex.axis = 0.5)
+
+post_means = colMeans(output$theta.post) # stima a posteriori del punteggio medio di ciascun provider 
+sample_means = sapply(unique(x), function(i) mean(y[x == i]))
+order_x<- c(2,3,1,4)
+points(sample_means[order_x], col = "blue", pch = 16) # metti apposto questo grafico
+points(post_means, col = "green")
+legend("bottomright",
+       legend = c("Sample Mean", "Posterior Mean"),
+       col = c("blue", "green"),
+       pch = c(16, 1),
+       bty = "n")
+
+#mean(((output$theta.post[,1] - output$theta.post[,3])/output$theta.post[,3])*100)
+```
+
+The graph above shows the posterior $\theta$ boxplots: we can see that the sample mean (frequentist approach) coincide with the posterior mean of each $\theta$, due to the fact that our prior is not informative and, as percevied before doing any posterior analysis, there is a difference between the median price of the houses depending on the ocean proximity. 
+
+## Geweke test  
+
+The idea of the Geweke test is to take two "windows" of the chain and compare the means, that should be equal if the chained has converged to the posterior distribution. The Geweke statistic $Z_n$ is distributed as a N(0,1) as the number of iteration goes to infinity: 
+\[Z_n = \frac{\bar{\theta}_I - \bar{\theta}_L}{\sqrt{\hat{s}^2_I + \hat{s}^2_L}}\to\mathcal{N}(0, 1) \quad \text{as} \quad n \to \infty\]
+where $\bar{\theta_I}$ and $\bar{\theta_L}$ are the sample means of the first 30% iterations and last 30% iterations in the chain, $n = n_I + n_L$ and $\hat{s_I}^2$ and $\hat{s_L}^2$ are the sample variances of ${\theta_I}$ and ${\theta_L}$.  
+The hypothesis are: $$
+\left\{
+\begin{aligned}
+H_0 &: \bar{\theta}_I = \bar{\theta}_L \\
+H_1 &: \bar{\theta}_I \ne \bar{\theta}_L
+\end{aligned}
+\right.$$
+
+```{r echo=FALSE, warning = FALSE}
+library(coda)
+
+geweke_hier <- c(geweke.diag(output$theta.post[, 1], frac1 = 0.3, frac = 0.3)$z,
+  geweke.diag(output$theta.post[, 2], frac1 = 0.3, frac = 0.3)$z,
+  geweke.diag(output$theta.post[, 3], frac1 = 0.3, frac = 0.3)$z,
+  geweke.diag(output$theta.post[, 4], frac1 = 0.3, frac = 0.3)$z,
+  geweke.diag(output$sigma_2.post,frac1 = 0.3, frac = 0.3)$z,
+  geweke.diag(output$tau_2.post,frac1 = 0.3, frac = 0.3)$z,
+  geweke.diag(output$mu.post,frac1 = 0.3, frac = 0.3)$z)
+
+
+param_names <- expression(theta[1], theta[2],theta[3],theta[4], sigma^2, tau^2, mu)
+
+geweke_df <- as.data.frame(t(round(geweke_hier, 3)))
+colnames(geweke_df) <- param_names
+rownames(geweke_df) <- "Geweke_Z"
+geweke_df
+
+```
+If the absolute value of the statistic is less than 1.96 ($z_{1-a/2}$ with $\alpha = 0.05$), we cannot reject $H_0$: this is the case in our analysis.
+
+
+# Hierarchical Linear Regression Model  
+
+Once that we established that there is a different between the median house prices with respect to the groups, we would like to study how the covariates influence the response. As stated in the exploratory data analysis, the effect of the variables into the response do not change across groups, so in the linear regression model the $\beta_s$ will be common, while the intercept will be group-specific.  
+The hierarchical linear regression model is:
+\[
+Y_{ij} \mid \beta_{0j},\ \boldsymbol{\beta},\ \sigma^2 = \beta_{0j} + \boldsymbol{\beta}^\top x_{ij} + \varepsilon_{ij}, \quad \text{where } \varepsilon_{ij} \overset{\text{iid}}{\sim} \mathcal{N}(0, \sigma^2)
+\]  
+
+The model assumes that the observations are independent given the group-specific intercept $\beta_0j$, the coefficients $\underline{\beta}$ and the common variance $\sigma^2$, and they are distributed as a Normal:
+\[
+y_{ij} \mid \beta_{0j},\ \boldsymbol{\beta},\ \sigma^2 \overset{\text{ind}}{\sim} \mathcal{N}\left( \beta_{0j} + \boldsymbol{\beta}^\top x_{ij},\ \sigma^2 \right)
+\]
+
+As a consequence, the likelihood is the following:
+$$
+p(\underline{y} \mid \text{rest}) = \prod_{j=1}^{4} \prod_{i=1}^{n_j} p\left(y_{ij} \mid \beta_{0j},\ \boldsymbol{\beta},\ \sigma^2 \right)
+$$
+For this model, we will consider the following priors:
+\[
+\boldsymbol{\beta} \sim \mathcal{N}_p\left( \boldsymbol{\beta}_0,\ V^{-1} \right)
+\]  
+
+\[
+\frac{1}{\sigma^2} \sim \mathrm{Gamma}\left(\frac{\nu_0}{2}, \frac{\nu_0}{2} \sigma_0^2\right)
+\]  
+\[
+\beta_{0j} \sim \mathcal{N}(\mu, \tau^2)
+\]  
+\[
+\mu \sim \mathcal{N}(\mu_0, \gamma_0^2)
+\]  
+\[
+\frac{1}{\tau^2} \sim \mathrm{Gamma}\left(\frac{\eta_0}{2}, \frac{\eta_0}{2} \tau_0^2 \right)
+\]
+
+Since the posterior inference is highly sensitive from the choice of a fixed prior hyperparameter for the precision matrix $\text{V}^-1$ of the $\boldsymbol{\beta}$, we decided to consider an additive prior on $\text{V}$: by doing so, we allow the data to have more influence on the posterior distribution of the precision matrix. The prior is:
+
+\[
+V \sim \text{Wishart}(a, U), \quad \text{where } U \text{ is a } p \times p \text{ matrix}
+\]  
+
+As prior hyperparameters, we have chosen the following value: for $\mu_0$, $\gamma_0^2$, $\eta_0$, $\tau_0^2$, $\nu_0$, and $\sigma_0^2$ we have taken the same values of the hierarchical model; for $\underline(beta_0)$ we have chosen a null vector of length 6 (number of predictors), so a priori we don't know if the effect is positive or negative; for $\text{U}$ we have chosen a diagonal matrix (6x6) in order to have a weakly informative prior on $\text{V}$, and a = 6 because it must holds that a > p - 1.  
+```{r eval=FALSE}
+X = as.matrix(Housing_data[, -c(7, 8)]) # do not consider the response and the group variable
+p = ncol(X)
+Beta0  = rep(0, p)
+U = diag(0.1, p)
+a = p
+```
+  
+  
+Since we are in the semi-conjugate case, the joint posterior distribution is
+$$
+p\left(\mu, \tau^2, \sigma^2, \beta_{01}, \ldots, \beta_{0m}, \underline{\beta}, V \mid \underline{y}_1, \ldots, \underline{y}_m \right) 
+\propto 
+\prod_{j=1}^{m} \left\{ \prod_{i=1}^{n_j} p\left(y_{ij} \mid \beta_{0j}, \underline{\beta}, \sigma^2 \right) \right\} 
+\cdot \prod_{j=1}^{m} p\left(\beta_{0j} \mid \mu, \tau^2 \right) 
+\cdot p(\mu) \cdot p(\tau^2) \cdot p(\sigma^2) \cdot p(\underline{\beta} \mid V) \cdot p(V)
+$$
+that can be approximated by using Gibbs Sampling from the full conditional distributions. 
+The full conditional distribution of $\boldsymbol{\beta}$ is obtained through:
+\[
+p(\boldsymbol{\beta} \mid \text{rest}) \propto \prod_{j=1}^{m} \prod_{i=1}^{n_j} p(y_{ij} \mid \beta_{0j}, \boldsymbol{\beta}, \sigma^2) \times p(\boldsymbol{\beta})
+\] 
+\[
+\boldsymbol{\beta} \mid \text{rest} \sim \mathcal{N}_p \left( A^{-1} \underline{\mathbf{b}},\ A^{-1} \right)
+\]
+\[
+\text{where} \quad 
+A = \left( \frac{\sum_{j=1}^m \sum_{i=1}^{n_j} x_{ij}^2}{\sigma^2} \right) + V, \quad
+\underline{\mathbf{b}} = \left( \frac{\sum_{j=1}^m \sum_{i=1}^{n_j} x_{ij} (y_{ij} - \beta_{0j})}{\sigma^2} \right) + V \boldsymbol{\beta}_0
+\]  
+The $A$ matrix is the sum between the prior precision matrix $V$ and the sum of the squared predictors' values $x_{ij}^2$ over $\sigma^2$, that is the expected Fisher information (that is also the sample precision); so the posterior variance of $\underline{\beta}$ is the sum between the sample covariance matrix and the prior covariance matrix. The vector $b$ is the sum of the numerator of OLS estimates for $\underline{\beta}$ (OLS: $\hat{\boldsymbol{\beta}} = \left( \sum_{j=1}^{m} \sum_{i=1}^{n_j} \mathbf{x}_{ij} \mathbf{x}_{ij}^\top \right)^{-1}\left( \sum_{j=1}^{m} \sum_{i=1}^{n_j} \mathbf{x}_{ij} (y_{ij} - \beta_{0j}) \right))$ over $\sigma^2$ and of the prior precision matrix $V$ * $\beta_0$ prior mean.  
+
+
+The full conditional distribution of $\tilde{\sigma}^2 = 1/\sigma^2$ is obtained through:
+\[
+p(\tilde{\sigma}^2 \mid \text{rest}) \propto \prod_{j=1}^{m} \prod_{i=1}^{n_j} p(y_{ij} \mid \beta_{0j}, \boldsymbol{\beta}, \sigma^2) \times p(\tilde{\sigma}^2)
+\]
+\[
+\tilde{\sigma}^2\mid\text{rest} \sim \mathrm{Gamma}\left(\frac{\nu_n}{2}, \frac{\nu_n}{2} \sigma_n^2 \right)
+\hspace{1cm}\text{where}\
+\nu_n = \nu_0 + n,
+\quad
+\sigma_n^2 = \frac{1}{\nu_n} \left[ \nu_0 \sigma_0^2 + \sum_{j=1}^m \sum_{i=1}^{n_j} \left( (y_{ij} - \beta_{0j}) - \boldsymbol{\underline{\beta}}^\top \mathbf{x}_{ij} \right)^2 \right]
+\]  
+$\nu_n$ is the sum between prior sample size $\nu_0$ and actual sample size $n$, while $\sigma_n^2$ is the posterior mean of $\sigma^2$, that is the sum of prior mean $\sigma_0^2$ and the residual sum of squares RSS $\sum_{j=1}^m \sum_{i=1}^{n_j} \left( (y_{ij} - \beta_{0j}) - \boldsymbol{\underline{\beta}}^\top \mathbf{x}_{ij} \right)^2$.  
+
+
+The full conditional distribution of $\beta_0j$ is obtained through:  
+
+\[
+p(\beta_{0j} \mid \text{rest}) \propto \prod_{i=1}^{n_j} p(y_{ij} \mid \beta_{0j}, \underline{\beta}, \sigma^2) \cdot p(\beta_{0j})
+\] 
+\[
+\beta_{0j} \mid \text{rest} \sim \mathcal{N}\left(\frac{b}{a}, \frac{1}{a}\right)
+\hspace{0.5cm}\text{where}
+\
+a = \frac{n_j}{\sigma^2} + \frac{1}{\tau^2}
+\hspace{0.2cm}\text{and}\hspace{0.1cm}\
+b = \sum_{i=1}^{n_j} \frac{y_{ij} - \underline{\beta}^\top x_{ij}}{\sigma^2} + \frac{\mu}{\tau^2}
+\] 
+
+$b$ is the sum between the sample mean's numerator of $\beta_0j$ ($\bar{\beta}_{0j} = \frac{1}{n_j} \sum_{i=1}^{n_j} \left( y_{ij} - \boldsymbol{\beta}^\top \mathbf{x}_{ij} \right)$) over $\sigma^2$ and the prior mean $\mu$ over prior variance $\tau^2$. The posterior variance is the sum between prior variance $\tau^2$ and the sample variance $\sigma^2/n_j$.    
+
+
+The full conditional distribution of $\mu$ is obtained through:
+\[
+p(\mu \mid \text{rest}) \propto \prod_{j=1}^{m} p(\beta_{0j} \mid \mu, \tau^2) \cdot p(\mu)
+\] 
+\[
+\mu \mid \text{rest} \sim \mathcal{N}\left( \frac{b}{a}, \frac{1}{a} \right)
+\hspace{0.5cm}\text{where}\
+a = \frac{m}{\tau^2} + \frac{1}{\gamma_0^2}
+\hspace{0.2cm}\text{and}\hspace{0.1cm}\
+b = \frac{\mu_0}{\gamma_0^2} + \sum_{j=1}^{m} \frac{\beta_{0j}}{\tau^2}
+\]
+The posterior variance of $\mu$ is the sum between prior variance $\gamma_0^2$ and the sample variance $\tau^2/m$, while $b$ is the sum between the prior mean $\mu_0$ over prior variance $\gamma_0^2$ and the sample mean's numerator ($\sum_{j=1}^{m}\beta_{0j}$) over $\tau^2$.  
+
+The full conditional distribution of $\tilde{\tau}^2 = 1/\tau^2$ is obtained through: 
+\[
+p(\widetilde{\tau}^2 \mid \text{rest}) \propto \prod_{j=1}^{m} p(\beta_{0j} \mid \mu, \tau^2) \cdot p(\widetilde{\tau}^2)
+\]
+\[
+\widetilde{\tau}^2 \mid \text{rest} \sim \text{Gamma}\left(\frac{\eta_n}{2}, \frac{\eta_n}{2} \tau_n^2\right)
+\hspace{0.5cm}\text{where}\
+\eta_n = \eta_0 + m
+\hspace{0.2cm}\text{and}\hspace{0.2cm}\tau_n^2 = \frac{1}{\eta_n} \left( \sum_{j=1}^{m} (\beta_{0j} - \mu)^2 + \eta_0 \tau_0^2 \right)
+\]
+
+$\eta_n$ is the sum between prior sample size $\eta_0$ and actual sample size $m$, while $\tau_n^2$ is the posterior mean of $\tau^2$, that is the sum of the prior mean $\tau_0^2$ and the sum of the square deviation of each $\beta_0j$ from their mean $\mu$, which represents a measure of the variability of the $\beta_0js$.  
+
+
+The full conditional distribution of $\text{V}$ is obtained through:
+\[
+p(V \mid \text{rest}) \propto p(\underline{\beta} \mid V) \cdot p(V)
+\]
+\[
+V \mid \text{rest} \sim \text{Wishart}(a_n, U_n)
+\hspace{0.5cm}\text{where}
+\hspace{0.2cm}\
+a_n = a + 1
+\hspace{0.2cm}\text{and}\hspace{0.2cm}
+U_n = U + (\underline{\beta} - \underline{\beta}_0) (\underline{\beta} - \underline{\beta}_0)^\top
+\]  
+
+The matrix $U_n$ is the sum between the prior hyperparameter $U$ and the outer product of the difference between the coefficients and their prior means $\underline{\beta_0}$.  
+
+
+To approximate the full posterior distribution, we can consider the following Gibbs Sampling scheme:
+\[
+\begin{aligned}
+&\text{Initialize } \underline{\beta}_0^{(0)},\ \tau^{2(0)},\ \underline{\beta}^{(0)},\ \sigma^{2(0)},\ V^{(0)}
+\\
+&\text{For } s = 1, \ldots, 5000: \\
+&\quad \text{Update } (\mu, \tau^2): \\
+&\quad\quad \text{Sample } \mu^{(s)} \sim p\left(\mu \mid \underline{\beta}_0^{(s-1)},\ \tau^{2(s-1)}\right) \\
+&\quad\quad \text{Sample } \tau^{2(s)} \sim p\left(\tau^2 \mid \underline{\beta}_0^{(s-1)},\ \mu^{(s)}\right) 
+\\
+&\quad \text{Update } \underline{\beta}_0: \\
+&\quad\quad \text{For } j = 1, \ldots, 4: \\
+&\quad\quad\quad \text{Sample } \beta_{0j}^{(s)} \sim p\left(\beta_{0j} \mid \mu^{(s)},\ \tau^{2(s)},\ \sigma^{2(s-1)},\ \underline{y}_j,\ \underline{\beta}^{(s-1)}\right) \\
+&\quad \text{Update } \underline{\beta}: \\
+&\quad\quad \text{Sample } \underline{\beta}^{(s)} \sim p\left(\underline{\beta} \mid V^{(s-1)},\ \sigma^{2(s-1)},\ \underline{\beta}_0^{(s)},\ \underline{y}\right) \\
+&\quad \text{Update } V: \\
+&\quad\quad \text{Sample } V^{(s)} \sim p\left(V \mid \underline{\beta}^{(s)}\right) \\
+&\quad \text{Update } \sigma^2: \\
+&\quad\quad \text{Sample } \sigma^{2(s)} \sim p\left(\sigma^2 \mid \underline{\beta}^{(s)},\ \underline{\beta}_0^{(s)},\ \underline{y}\right)
+\end{aligned}
+\]  
+
+We initialized $\underline{\beta_0}^{(0)}$, $\underline{\beta}^{(0)}$, $\left(\tau^2\right)^{(0)}$, $\left(\sigma^2\right)^{(0)}$, $\text{V}^{(0)}$ in the following way:
+```{r eval = FALSE}
+Beta_0_j = colMeans(output$theta.post) 
+tau_2 = var(Beta_0_j) 
+Beta   = c(solve(t(X)%*%X)%*%t(X)%*%y)
+sigma2 = c(t(y - X%*%Beta)%*%(y - X%*%Beta)/(n - p - 1))
+V0 = (1/sigma2)*t(X)%*%X 
+```
+
+$\underline{\beta}^{(0)}$, $\left(\sigma^2\right)^{(0)}$, $\text{V}^{(0)}$ are the frequentist estimates, while the $\underline{\beta_0}^{(0)}$ is the posterior expectation of the $\underline{\theta}$ obtained from the previous Gibbs Sampling of the hierarchical model, and $\left(\tau^2\right)^{(0)}$ is the variance of the $\beta_0j$.
+
+```{r include=FALSE}
+library(mvtnorm)
+
+X = as.matrix(Housing_data[, -c(7, 8)])
+
+###############
+###############
+X = scale(X) # Non so perchè ma standardizzando funziona (ho valori alti per le X)
+###############
+###############
+
+groups = unique(x)
+
+
+# standardizzo le X perchè le scale delle covariate sono molto diverse tra di loro (es. price(token) e Training dataset size)
+
+
+# scrivo la full conditional di mu e tau
+set.seed(1)
+
+full_conditional_mu_tau = function(Beta_0_j, tau_2, gamma.0_2, mu.0, eta.0, tau.0_2){
+  
+  # inializziamo m e theta.bar per mu
+  
+  m = length(Beta_0_j)
+  Beta_0_j_bar = mean(Beta_0_j)
+  
+  ##########
+  # full conditional mu
+  ##########
+  
+  # aggiorniamo i parametri
+  
+  gamma.n_2 = (1/gamma.0_2 + m/tau_2)^-1
+  mu.n = ((mu.0/gamma.0_2 + m * Beta_0_j_bar/tau_2) * gamma.n_2)
+  
+  # faccio sample di mu
+  
+  mu = rnorm(1, mu.n, sqrt(gamma.n_2))
+
+  ##########
+  # full conditional tau
+  ##########
+  
+  eta.n = eta.0 + m
+  tau_2 = (rgamma(1, eta.n/2, (eta.0 * tau.0_2 + sum((Beta_0_j - mu)^2))/2))^(-1)
+  
+  return(mu_tau = list(mu = mu, tau_2 = tau_2))
+}
+
+
+
+
+
+# scrivo la full conditional di Beta_0_j
+
+full_conditional_Beta_0_j = function(mu, tau_2, sigma2, yj, Beta, Xj){
+  
+  # inizializzo nj e yj_bar per theta
+  
+  nj = length(yj)
+  
+  # aggiorniamo i parametri 
+  
+  tau.n_2 = (1/tau_2 + nj/sigma2)^-1
+  mu.n = (mu/tau_2 + sum(yj - Xj%*%Beta)/sigma2) * tau.n_2
+  
+  # faccio sample di theta
+  
+  Beta_0_j = rnorm(1, mu.n, sqrt(tau.n_2))
+  
+  return(Beta_0_j)
+}
+
+
+
+
+
+
+
+#############################################
+## (1) Sample beta conditionally on sigma2 ##
+#############################################
+
+
+total_sum = 0
+for(j in unique(x)){
+  Xj = X[x == j,]
+  total_sum = total_sum + sum(Xj ^ 2)
+}
+
+
+full_conditional_Beta = function(V0, sigma2, total_sum, sum_xy, Beta0){
+
+  A1 = V0 + total_sum/sigma2
+  b1 = V0%*%Beta0 + sum_xy/sigma2
+  
+  Beta = c(rmvnorm(1, solve(A1)%*%b1, solve(A1)))
+  
+  return(Beta)
+}
+
+
+################################
+
+
+
+#############################################
+## (2) Sample sigma2 conditionally on beta ##
+#############################################
+full_conditional_sigma2 = function(Beta, nu.0, sigma2.0, y_tilde, n){
+  
+  nu.n = n +nu.0
+  RSS = sum((y_tilde - X %*% Beta)^2)
+  
+  gamma  = rgamma(1, nu.n/2, (nu.0*sigma2.0 + RSS)/2)
+  sigma2 = gamma^(-1)
+  
+  return(sigma2)
+}
+
+# Mettiamo la prior a V0 perchè la sua scelta condiziona troppo il valore dei Beta
+
+full_conditional_V0 = function(Beta, U, a, Beta0){
+  S_Beta = (Beta - Beta0)%*%t(Beta - Beta0)
+  a_n = a + 1
+  U_n = U + S_Beta
+  V0 = rWishart(1, a_n, solve(U_n))[,,1] # usiamo solve(U_n) perchè la funzione wishart lo richiede dato che è parametrizzata con lo scale o non rate
+  # metto [,,1] perchè così il risultato è una matrice e non un array
+  return(V0)
+}
+
+##############################################
+
+
+
+# Gibbs
+
+gibbs_linear = function(gamma.0_2, nu.0, mu.0, eta.0, tau.0_2, V0, Beta0, y, X, sigma2.0, S, a, U){
+  
+  n = nrow(X)
+  m = length(unique(x))
+  p = ncol(X)
+  
+  Beta_0_j.post  = matrix(NA, S, m)
+  mu.post     = c()
+  tau_2.post   = c()
+  Beta_post   = matrix(NA, S, p)
+  sigma2_post = matrix(NA, S, 1)
+  V0_post = array(NA, c(p, p, S))
+  y_star = matrix(NA, S, m)
+  
+  Beta_0_j = colMeans(output$theta.post) # inizilizziamo Beta_0_j
+  tau_2 = var(Beta_0_j) # inizializziam tau_2
+  # inizializzo valori di Beta e sigma2
+  Beta   = c(solve(t(X)%*%X)%*%t(X)%*%y)
+  sigma2 = c(t(y - X%*%Beta)%*%(y - X%*%Beta)/(n - p - 1))
+  V0 = (1/sigma2)*t(X)%*%X # e non sigma2*solve(t(X)%*%X) perchè V0 è la precision
+  # fisso iperparametri di mu e tau
+  gamma.0_2 = 2500
+  mu.0 = 200
+  eta.0 = 2
+  tau.0_2 = 1000
+  
+  # fissimao gli iperparametri di Beta
+  
+  Beta0  = rep(0, p) # li mettiamo 0 dato che possono essere sia positivi che negativi
+
+  # inizializzo gli iperparametri di sigma2
+  nu.0 = 2 
+  sigma2.0 = 1000
+  
+  # inizializziamo gli iperparametri di V0
+  U = diag(1, p)
+  a = p
+  
+  
+  # calcolo delle quantità utili 
+  total_sum = 0
+  for(j in unique(x)){
+    Xj = X[x == j,]
+    total_sum = total_sum + t(Xj) %*% Xj
+  }
+  
+  
+  ###################
+  ## Gibbs sampler ##
+  ###################
+  
+  for(s in 1:S){
+    
+    
+    ###########
+    # Sample di mu e tau_2
+    ###########
+    
+    mu_tau_2 = full_conditional_mu_tau(Beta_0_j, tau_2, gamma.0_2, mu.0, eta.0, tau.0_2)
+    mu = mu_tau_2$mu
+    tau_2 = mu_tau_2$tau_2
+    
+    
+    ###########
+    # Sample di Beta_0_j
+    ###########
+    
+    
+    for (j in unique(x)){
+      yj = y[x == j]
+      Xj = X[x == j,]
+      Beta_0_jj = full_conditional_Beta_0_j(mu, tau_2, sigma2, yj, Beta, Xj)
+      Beta_0_j[j] = Beta_0_jj
+    }
+    
+    y_tilde = numeric(length(y))
+    for (j in unique(x)){
+      y_tilde[x == j] = y[x == j] - Beta_0_j[j]
+    }
+    
+    sum_xy = t(X) %*% y_tilde
+    
+    #############################################
+    ## Sample Beta
+    #############################################
+    
+    Beta = full_conditional_Beta(V0, sigma2, total_sum, sum_xy, Beta0)
+      
+    
+    #############################################
+    ## Sample V0
+    #############################################
+    
+    V0 = full_conditional_V0(Beta, U, a, Beta0)
+    
+    
+    #############################################
+    ## Sample sigma2 
+    #############################################
+    
+    sigma2 = full_conditional_sigma2(Beta, nu.0, sigma2.0, y_tilde, n)
+    
+    #########################
+    ## Store sampled draws ##
+    #########################
+    
+    for (j in unique(x)){
+    y_star[s,j] = rnorm(1, mean = Beta_0_j[j] + colMeans(X) %*% t(Beta), sqrt(sigma2))
+    }
+    
+    Beta_0_j.post[s,] = Beta_0_j
+    tau_2.post[s] = tau_2
+    mu.post[s] = mu
+    Beta_post[s,]   = Beta
+    V0_post[,,s] = V0
+    sigma2_post[s,] = sigma2
+    
+  }
+  colnames(Beta_0_j.post) = unique(x)
+  
+  return(list(Beta_0_j.post = Beta_0_j.post,
+              tau_2.post = tau_2.post,
+              mu.post = mu.post,
+              Beta_post   = Beta_post,
+              V0_post = V0_post,
+              sigma2_post = sigma2_post,
+              y_star = y_star))
+  
+  
+}
+
+
+
+S = 20000
+output_2 = gibbs_linear(gamma.0_2, nu.0, mu.0, eta.0, tau.0_2, V0, Beta0, y, X, sigma2.0, S, a, U)
+```
+
+```{r echo=FALSE, fig.height=6, fig.width=6, fig.show='hold'}
+
+par(mfrow = c(3, 3))
+
+thin = seq(1, S, by = 25)
+ 
+Beta_post_thinned1 = output_2$Beta_post[,1][thin][-c(1,20)]
+
+Beta_post_thinned2 = output_2$Beta_post[,2][thin][-c(1,20)]
+
+Beta_post_thinned3 = output_2$Beta_post[,3][thin][-c(1,20)]
+
+Beta_post_thinned4 = output_2$Beta_post[,4][thin][-c(1,20)]
+
+Beta_post_thinned5 = output_2$Beta_post[,5][thin][-c(1,20)]
+
+Beta_post_thinned6 = output_2$Beta_post[,6][thin][-c(1,20)]
+
+
+acf(Beta_post_thinned1, main = expression("Posterior " ~ beta ~ " age"))
+acf(Beta_post_thinned2, main = expression("Posterior " ~ beta ~ " rooms"))
+acf(Beta_post_thinned3, main = expression("Posterior " ~ beta ~ " bedrooms"))
+
+plot(Beta_post_thinned1, type = "l", ylab = expression("Posterior " ~ beta ~ " age"))
+plot(Beta_post_thinned2, type = "l", ylab = expression("Posterior " ~ beta ~ " rooms"))
+plot(Beta_post_thinned3, type = "l", ylab = expression("Posterior " ~ beta ~ " bedrooms"))
+
+plot(Beta_post_thinned4, type = "l", ylab = expression("Posterior " ~ beta ~ " population"))
+plot(Beta_post_thinned5, type = "l", ylab = expression("Posterior " ~ beta ~ " households"))
+plot(Beta_post_thinned6, type = "l", ylab = expression("Posterior " ~ beta ~ " income"))
+
+
+
+
+```
+
+```{r echo=FALSE, fig.width=6, fig.height=4, fig.show='hold'}
+
+par(mfrow = c(2,3))
+
+acf(Beta_post_thinned4, main = expression("Posterior " ~ beta ~ " population"))
+acf(Beta_post_thinned5, main = expression("Posterior " ~ beta ~ "households"))
+acf(Beta_post_thinned6, main = expression("Posterior " ~ beta ~ " income"))
+
+hist(output_2$sigma2_post[thin][-c(1,20)], main = expression("Posterior " ~ sigma^2), xlab = expression(sigma^2))
+plot(output_2$sigma2_post[thin][-c(1,20)], type = "l", ylab = expression("Posterior " ~ sigma^2))
+acf(output_2$sigma2_post[thin][-c(1,20)], main = expression("Posterior " ~ sigma^2))
+
+```
+
+
+After thinning the chains every 25 iterations and burning the first 20 iterations, we can see from the ACF graphs and traceplots that the autocorrelation decreased noticeably: there is still some dependence in the initial lags, but as they increase the dependence becomes negligible. Since we have done thinning and burn-in for the $\beta$, to maintain consistency across iterations between every parameters, we have to do thinning and burn-in also for all the other parameters. By looking at the graphs related to $\sigma^2$, there is no dependence in the chain nor seasonality and trends. The graphs for $\mu$, $\beta_0j$ ($\theta_j$ in the hierarchical model) and $\tau^2$ are very similar to those obtained in the hierarchical model, and even in this case they do not show dependency in the chains.
+
+```{r echo=FALSE, fig.width=6, fig.height=3}
+boxplot(output_2$Beta_post,
+        names = c("age", "rooms", "bedrooms", "population", "households", "income"),
+        cex.axis = 0.65, ylab = expression("Posterior " * beta), xlab = "Covariates", main = expression(beta))
+```
+
+The graph above shows the boxplots for the posterior coefficients: they are all significantly different from zero, since none of the interquantiles contains the zero value. Moreover, as the median age of the houses in the neighbourhood is higher, the median house price increases. The same holds for the number of bedrooms in the neighbourhood, the number of households and the median income of the neighbourhoods, since they all have a positive effect on the response.  
+On the other hand, the higher is the number of rooms and bigger is the population in the neighbourhood, the median house price decreases, since they have a negative effect on the response.
+
+## Geweke Test
+
+As we did for the hierarchical model, we perform the Geweke test on the posterior $\underline{\beta}$ and posterior $\sigma^2$.
+
+```{r echo=FALSE}
+geweke_linear <- c(
+  geweke.diag(Beta_post_thinned1, frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(Beta_post_thinned2, frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(Beta_post_thinned3, frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(Beta_post_thinned4, frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(Beta_post_thinned5, frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(Beta_post_thinned6, frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(output_2$sigma2_post[thin][-c(1,20)], frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(output_2$mu.post[thin][-c(1,20)], frac1 = 0.3, frac2 = 0.3)$z,
+  geweke.diag(output_2$tau_2.post[thin][-c(1,20)], frac1 = 0.31, frac2 = 0.3)$z
+)
+
+param_names <- expression(beta[1], beta[2],beta[3],beta[4],beta[5],beta[6], sigma^2, mu, tau^2)
+
+geweke_df <- as.data.frame(t(round(geweke_linear, 3)))
+colnames(geweke_df) <- param_names
+rownames(geweke_df) <- "Geweke_Z"
+geweke_df
+```
+
+If the absolute value of the statistic is less than 1.96 ($z_{1-a/2}$ with $\alpha = 0.05$), we cannot reject $H_0$: this is the case in our analysis.
+
+## Posterior predictive distributions
+
+Let us consider a hypothetical new neighborhood, not included in the original dataset, whose predictor values correspond to the average covariate values observed in the neighborhoods already analyzed. Our objective is to estimate the median house price in this new neighborhood, depending on its location relative to the ocean
+So we have computed the posterior predictive distribution for each group
+```{r echo=FALSE}
+par(mfrow = c(2, 2))
+groups = c("<1 Hour", "Inland", "Near Bay", "Near Ocean")
+for (j in 1:length(groups)) {
+  hist(output_2$y_star[, j],
+       main = paste("Posterior predictive - ", groups[j]), xlab = paste("y* for ", groups[j]),
+       col = "gray", breaks = 30, xlim = c(0,600))
+}
+
+
+posterior_pred_means <- apply(output_2$y_star, MARGIN = 2, FUN = mean); posterior_pred_means
+```
+
+The values above are the means of the posterior predictive distributions of each group: if the neighbourhood is "<1 Hour" far from ocean, the predicted median house price will approximately be 226000 dollars; if the neighbourhood is "Inland" the predicted median house price will be approximately 158000 dollars; if the neighbourhood is in "Near Bay", the predicted median house price will be approximately 229500 dollars; if the neighbourhood is "Near ocean", the predicted median house price will be approximately 239600 dollars.
+
+# Conclusion
+
+Thanks to the hierarchical model, we can conclude that the data show a difference in median house prices across neighbourhoods based on the ocean proximity, with a particularly significant difference for inland neighbourhoods. After performing hierarchical linear regression, where we assumed that the covariates' effect on the response does not depends on the distance from the ocean, we found out that the housing median age, total number of bedrooms, number of households and median income within a neighbourhood have a positive effect on the response. Specifically, as these factors increase, the median house price tends to rise. On the other hand, the population and total number of rooms in the neighbourhood have a negative effect on the response, with increases in these variables associated with decreases in median house prices.
+The data was collected in 2012, so further research could be to check if data collected in recent years confirm our results. 
+
+
+
+
+
+
